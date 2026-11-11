@@ -1,4 +1,4 @@
-# soehnle-google-health-bridge
+# soehnle-scale-google-health-bridge
 
 This PHP script emulates the terminated Soehnle/Leifheit data service for Webconnect body scales like the 063340 model. It allows continued use of the scale by logging weight measurements locally and forwarding them to Google Health.
 
@@ -70,7 +70,7 @@ The script resides in `$WEB_ROOT/devicedataservice/dataservice.php`.
 
 ### One way
 
-To handle extensionless PHP execution (mapping requests like `https://bridge1.soehnle.de/devicedataservice/dataservice?data=...` to `dataservice.php`), use the provided `.htaccess` file for Apache config:
+To handle extensionless PHP execution (mapping requests like `https://bridge1.soehnle.de/devicedataservice/dataservice?data=...` to `dataservice.php`), add to your Apache config:
 
 ```
 RewriteEngine On
@@ -78,7 +78,7 @@ RewriteCond %{SCRIPT_FILENAME} !-d
 RewriteRule ^([^.]+)$ $1.php [NC,L]
 ```
 
-or use the provided `.htaccess` file.
+or use the provided `.htaccess` file from this project.
 
 For Nginx, add to your configuration:
 
@@ -114,7 +114,7 @@ Once you have completed the authorization steps, you can test the integration:
 
 ## Receiving Data from Scale
 
-The scale sends data via GET requests to `https://bridge1.soehnle.de/devicedataservice/dataservice.php`. The script:
+The scale sends data via GET requests to `https://bridge1.soehnle.de/devicedataservice/dataservice?data=...`. The script:
 
 - Parses the data string for the weight.
 - Logs the weight to a daily log file in the `log/` directory (format: `dd.mm.yy hh:mm:ss weight`).
@@ -129,11 +129,12 @@ Example log entry:
 
 To upload existing log data to Google Health:
 
-- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=upload`
-- **Command line**: `php /path/to/upload.php --upload` or `php /path/to/upload.php -u`
-- **Preview without uploading**: `php /path/to/upload.php --preview` or `php /path/to/upload.php -p`
-- **Mark entries as done without uploading**: `php /path/to/upload.php --mark-only` or `php /path/to/upload.php -m`
 - Calling `upload.php` without a mode only displays usage and never uploads.
+- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php`
+- **Command line**: `php /path/to/upload.php`
+- **Preview without uploading**: - **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=preview`, `php /path/to/upload.php --preview` or `php /path/to/upload.php -p`
+- **Mark entries as done without uploading**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=mark-only`, `php /path/to/upload.php --mark-only` or `php /path/to/upload.php -m`
+- **Full run with uploading**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=upload`, `php /path/to/upload.php --upload` or `php /path/to/upload.php -u`
 
 The script performs the following steps:
 
