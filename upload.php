@@ -1,12 +1,101 @@
 <?php
 
-if (!file_exists(__DIR__ . '/config.php')) {
-    echo "ERROR: config.php not found. Please copy config_example.php to config.php and set your Fitbit credentials.\n";
-    exit;
+function print_usage($script_name)
+{
+	if (PHP_SAPI === 'cli') {
+		$usage = "Usage: php " . basename($script_name) . " <mode>\n\n"
+			. "Modes (choose exactly one):\n"
+			. "  -u, --upload      Upload new measurements to Google Health.\n"
+			. "  -p, --preview     Show eligible measurements without changing anything.\n"
+			. "  -m, --mark-only   Add eligible measurements to upload_history.txt without\n"
+			. "                    uploading them.\n\n"
+			. "Without a mode, this script only displays this usage. Existing history\n"
+			. "entries are skipped in all modes.\n";
+		fwrite(STDOUT, $usage);
+		return;
+	}
+
+	if (!headers_sent()) {
+		header('Content-Type: text/plain; charset=utf-8');
+	}
+	echo "Usage: upload.php?mode=<mode>\n\n"
+		. "Modes (choose one):\n"
+		. "  ?mode=upload      Upload new measurements to Google Health.\n"
+		. "  ?mode=preview     Show eligible measurements without changing anything.\n"
+		. "  ?mode=mark-only   Add eligible measurements to upload_history.txt without\n"
+		. "                    uploading them.\n";
 }
 
-require_once('config.php');
-require_once(__DIR__ . '/fitbit_common.php');
+$mode = null;
+if (PHP_SAPI === 'cli') {
+	foreach (array_slice($argv, 1) as $argument) {
+		$mode_aliases = [
+			'--upload' => 'upload',
+			'-u' => 'upload',
+			'--preview' => 'preview',
+			'-p' => 'preview',
+			'--mark-only' => 'mark-only',
+			'-m' => 'mark-only',
+		];
+		if (!isset($mode_aliases[$argument])) {
+			fwrite(STDERR, "ERROR: Unknown option: $argument\n\n");
+			print_usage($argv[0]);
+			exit(2);
+		}
+		if ($mode !== null) {
+			fwrite(STDERR, "ERROR: Choose exactly one mode.\n\n");
+			print_usage($argv[0]);
+			exit(2);
+		}
+		$mode = $mode_aliases[$argument];
+	}
+	if ($mode === null) {
+		print_usage($argv[0]);
+		exit(0);
+	}
+} else {
+	$mode = $_GET['mode'] ?? null;
+	if ($mode === null || $mode === '') {
+		print_usage('upload.php');
+		exit(0);
+	}
+	if (!in_array($mode, ['upload', 'preview', 'mark-only'], true)) {
+		echo "ERROR: Unknown mode.\n\n";
+		print_usage('upload.php');
+		exit(2);
+	}
+}
+
+$dry_run = $mode === 'preview';
+$mark_uploaded_without_upload = $mode === 'mark-only';
+
+if (file_exists(__DIR__ . '/config.php')) {
+	require_once(__DIR__ . '/config.php');
+} elseif (!$dry_run && !$mark_uploaded_without_upload) {
+	fwrite(PHP_SAPI === 'cli' ? STDERR : fopen('php://output', 'w'), "ERROR: config.php not found. Copy config_example.php to config.php and set your Google OAuth credentials.\n");
+	exit(1);
+}
+
+require_once(__DIR__ . '/google_health_common.php');
+
+if ($mode === 'upload' && !function_exists('curl_init')) {
+	$php_version = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+	$message = "ERROR: -u cannot upload because the PHP cURL extension is not loaded for the runtime executing this script.\n\n"
+		. "Install the extension for PHP " . $php_version . ":\n"
+		. "  Debian/Ubuntu: sudo apt update && sudo apt install php-curl\n"
+		. "  Versioned packages: install php" . $php_version . "-curl\n"
+		. "  NAS systems: use the package manager to install/enable the cURL module\n"
+		. "              matching the PHP runtime executing this script.\n\n"
+		. "For CLI runs, check the loaded configuration with 'php --ini' and verify\n"
+		. "that 'curl' appears in 'php -m'. If installed but not loaded, enable\n"
+		. "extension=curl in the listed php.ini and retry. Browser uploads may use a\n"
+		. "different PHP configuration; enable cURL there too and restart PHP-FPM or\n"
+		. "the web server.\n\n"
+		. "For a no-change preview use -p. The -m mode only adds entries to\n"
+		. "upload_history.txt and suppresses future uploads; it does not test cURL.\n";
+	fwrite(PHP_SAPI === 'cli' ? STDERR : fopen('php://output', 'w'), $message);
+	exit(1);
+}
 
 define('HISTORY_FILE', __DIR__ . '/upload_history.txt');
 define('UPLOAD_DELAY', 1); // Seconds between successful uploads
@@ -15,78 +104,22 @@ define('ERROR_DELAY', 3); // Seconds after error or rate limit
 date_default_timezone_set('Europe/Berlin');
 setlocale(LC_TIME, "de_DE.UTF-8", "de_DE@euro", "de_DE", "deu_deu", "de", "ge");
 
-header('Content-Type: text/plain; charset=utf-8');
-ob_start();
+if (PHP_SAPI !== 'cli') {
+	header('Content-Type: text/plain; charset=utf-8');
+	ob_start();
+}
 
-
-function send_to_fitbit($weight, $date, $time = null) {
-	$token_data = load_token();
-	if (!$token_data) {
-		echo "ERROR: No token available for Fitbit upload\n";
-		return false;
-	}
-
-	$access_token = $token_data['access_token'];
-	$max_retries = 3;
-	$retry_count = 0;
-
-	while ($retry_count < $max_retries) {
-		$url = 'https://api.fitbit.com/1/user/-/body/log/weight.json';
-		$data = [
-			'weight' => $weight,
-			'date' => $date,
-			'time' => $time ?? date('H:i:s'),
-		];
-
-		$ch = curl_init();
-		curl_setopt($ch, CURLOPT_URL, $url);
-		curl_setopt($ch, CURLOPT_POST, true);
-		curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($ch, CURLOPT_HTTPHEADER, [
-			'Authorization: Bearer ' . $access_token,
-			'Content-Type: application/json',
-		]);
-
-		$response = curl_exec($ch);
-		$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-		if ($http_code == 201) {
-			echo "✓ Uploaded: $weight kg on $date at " . ($time ?? date('H:i:s')) . "\n";
-			sleep(UPLOAD_DELAY);
-			return true;
-		} elseif ($http_code == 401) {
-			// Token expired - try refresh
-			$new_token = refresh_token($token_data['refresh_token']);
-			if ($new_token) {
-				$access_token = $new_token;
-				$retry_count++;
-				continue; // Retry with new token
-			} else {
-				echo "ERROR: Fitbit upload failed after token refresh\n";
-				sleep(ERROR_DELAY);
-				return false;
+function output_progress($message)
+{
+	echo $message;
+	if (PHP_SAPI === 'cli') {
+		while (ob_get_level() > 0) {
+			if (!@ob_end_flush()) {
+				break;
 			}
-		} elseif ($http_code == 429) {
-			$retry_count++;
-			if ($retry_count < $max_retries) {
-				$wait_time = ERROR_DELAY * $retry_count; // Progressive backoff: 3s, 6s, 9s
-				echo "Rate limit hit (attempt $retry_count/$max_retries) - waiting $wait_time seconds...\n";
-				sleep($wait_time);
-				continue; // Retry
-			} else {
-				echo "ERROR: Rate limit exceeded after $max_retries attempts - " . $response . "\n";
-				sleep(ERROR_DELAY);
-				return false;
-			}
-		} else {
-			echo "ERROR: HTTP $http_code - " . $response . "\n";
-			sleep(ERROR_DELAY);
-			return false;
 		}
+		flush();
 	}
-
-	return false;
 }
 
 function load_history() {
@@ -106,7 +139,7 @@ function load_history() {
 
 function save_to_history($date, $weight, $time) {
 	$entry = "$date|$weight|$time\n";
-	file_put_contents(HISTORY_FILE, $entry, FILE_APPEND);
+	return file_put_contents(HISTORY_FILE, $entry, FILE_APPEND | LOCK_EX) !== false;
 }
 
 function parse_log_date($date_str) {
@@ -156,6 +189,11 @@ function parse_line($line) {
 
 // Main logic
 echo "Starting batch upload from logs...\n";
+if ($dry_run) {
+	echo "PREVIEW: no API uploads or history changes will be made.\n";
+} elseif ($mark_uploaded_without_upload) {
+	echo "MARK-ONLY: eligible measurements will be added to upload_history.txt only.\n";
+}
 echo "================================\n";
 echo "Rate limit delay: " . UPLOAD_DELAY . "s between uploads, " . ERROR_DELAY . "s after errors\n";
 echo "================================\n\n";
@@ -163,6 +201,8 @@ echo "================================\n\n";
 $history = load_history();
 $log_dir = __DIR__ . '/log';
 $uploaded_count = 0;
+$dry_run_count = 0;
+$marked_count = 0;
 $duplicate_count = 0;
 $error_count = 0;
 $last_date = null;
@@ -205,13 +245,35 @@ foreach ($log_files as $log_file) {
 				$history_key = "$date|$weight"; // Track by date and weight to avoid duplicates
 
 				if (!isset($history[$history_key])) {
-					// Not yet uploaded
-					if (send_to_fitbit($weight, $date, $time_str)) {
-						save_to_history($date, $weight, $time_str);
-						$history[$history_key] = true;
-						$uploaded_count++;
+					if ($dry_run) {
+						echo "Would upload: $weight kg on $date at $time_str\n";
+						$dry_run_count++;
+					} elseif ($mark_uploaded_without_upload) {
+						if (save_to_history($date, $weight, $time_str)) {
+							$history[$history_key] = true;
+							echo "Marked as uploaded without sending: $weight kg on $date at $time_str\n";
+							$marked_count++;
+						} else {
+							echo "ERROR: Could not write upload_history.txt for $weight kg on $date at $time_str\n";
+							$error_count++;
+						}
 					} else {
-						$error_count++;
+						output_progress("Uploading: $weight kg on $date at $time_str...\n");
+						if (send_to_google_health($weight, $date, $time_str)) {
+							echo "Uploaded: $weight kg on $date at $time_str\n";
+							sleep(UPLOAD_DELAY);
+							if (save_to_history($date, $weight, $time_str)) {
+								$history[$history_key] = true;
+								$uploaded_count++;
+							} else {
+								echo "ERROR: Upload succeeded but upload_history.txt could not be updated.\n";
+								$error_count++;
+							}
+						} else {
+							echo "ERROR: Google Health upload failed for $weight kg on $date at $time_str\n";
+							sleep(ERROR_DELAY);
+							$error_count++;
+						}
 					}
 				} else {
 					$duplicate_count++;
@@ -228,12 +290,20 @@ foreach ($log_files as $log_file) {
 echo "\n================================\n";
 echo "Summary:\n";
 echo " Uploaded: $uploaded_count\n";
+if ($dry_run) {
+	echo " Would upload: $dry_run_count\n";
+}
+if ($mark_uploaded_without_upload) {
+	echo " Marked without upload: $marked_count\n";
+}
 echo " Duplicates skipped: $duplicate_count\n";
 echo " Errors: $error_count\n";
 echo "================================\n";
 
-if (!headers_sent()) {
-	header('Content-Length: ' . ob_get_length());
-}
 
-ob_end_flush();
+if (PHP_SAPI !== 'cli') {
+	if (!headers_sent()) {
+		header('Content-Length: ' . ob_get_length());
+	}
+	ob_end_flush();
+}

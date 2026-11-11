@@ -1,5 +1,6 @@
 config.php
 fitbit_log.txt
+google_health_log.txt
 last_request.txt
 log/
 token.txt

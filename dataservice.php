@@ -1,14 +1,23 @@
 <?php
 
 if (!file_exists(__DIR__ . '/config.php')) {
-    echo "ERROR: config.php not found. Please copy config_example.php to config.php and set your Fitbit credentials.\n";
+    echo "ERROR: config.php not found. Copy config_example.php to config.php and set your Google OAuth credentials.\n";
     exit;
 }
 
 require_once('config.php');
-require_once(__DIR__ . '/fitbit_common.php');
+require_once(__DIR__ . '/google_health_common.php');
 
-define('FITBIT_REDIRECT_URI', 'https://bridge1.soehnle.de/devicedataservice/dataservice?action=callback');
+if (!defined('GOOGLE_CLIENT_ID')) {
+    define('GOOGLE_CLIENT_ID', '');
+}
+if (!defined('GOOGLE_CLIENT_SECRET')) {
+    define('GOOGLE_CLIENT_SECRET', '');
+}
+if (!defined('GOOGLE_REDIRECT_URI')) {
+    define('GOOGLE_REDIRECT_URI', '');
+}
+
 define('DUPLICATE_REQUEST_WINDOW', 30); // seconds within which repeated identical requests are ignored
 
 date_default_timezone_set('Europe/Berlin');
@@ -20,52 +29,83 @@ ob_start();
 $action = $_GET['action'] ?? null;
 
 if ($action === 'authorize') {
-    $auth_url = 'https://www.fitbit.com/oauth2/authorize?' . http_build_query([
-        'client_id' => FITBIT_CLIENT_ID,
+    if (!google_health_configured()) {
+        echo "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI in config.php.\n";
+        send_response_and_exit();
+    }
+
+    session_start();
+    $_SESSION['google_oauth_state'] = bin2hex(random_bytes(32));
+    $auth_url = 'https://accounts.google.com/o/oauth2/v2/auth?' . http_build_query([
+        'client_id' => GOOGLE_CLIENT_ID,
         'response_type' => 'code',
-        'scope' => 'weight',
-        'redirect_uri' => FITBIT_REDIRECT_URI,
-        'expires_in' => 604800, // 1 week
+        'scope' => GOOGLE_HEALTH_WEIGHT_SCOPE,
+        'redirect_uri' => GOOGLE_REDIRECT_URI,
+        'access_type' => 'offline',
+        'prompt' => 'consent',
+        'state' => $_SESSION['google_oauth_state'],
     ]);
     header('Location: ' . $auth_url);
     ob_end_clean();
     header('Content-Length: 0');
     exit;
 } elseif ($action === 'callback') {
+    session_start();
+    $expected_state = $_SESSION['google_oauth_state'] ?? '';
+    unset($_SESSION['google_oauth_state']);
+    if ($expected_state === '' || !hash_equals($expected_state, $_GET['state'] ?? '')) {
+        echo "Authorization failed: invalid OAuth state. Start again at dataservice?action=authorize.\n";
+        send_response_and_exit();
+    }
+
     $code = $_GET['code'] ?? null;
     if ($code) {
-        $url = 'https://api.fitbit.com/oauth2/token';
-        $data = [
-            'client_id' => FITBIT_CLIENT_ID,
-            'grant_type' => 'authorization_code',
-            'redirect_uri' => FITBIT_REDIRECT_URI,
-            'code' => $code,
-        ];
+        if (!google_health_configured()) {
+            echo "Google OAuth is not configured. Set your Google credentials in config.php.\n";
+            send_response_and_exit();
+        }
 
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Authorization: Basic ' . base64_encode(FITBIT_CLIENT_ID . ':' . FITBIT_CLIENT_SECRET),
-            'Content-Type: application/x-www-form-urlencoded',
+        $result = google_health_token_request([
+            'client_id' => GOOGLE_CLIENT_ID,
+            'client_secret' => GOOGLE_CLIENT_SECRET,
+            'grant_type' => 'authorization_code',
+            'redirect_uri' => GOOGLE_REDIRECT_URI,
+            'code' => $code,
         ]);
 
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($result['status'] === 200 && !empty($result['data']['access_token'])) {
+            $granted_scopes = preg_split('/\s+/', trim($result['data']['scope'] ?? ''));
+            if (!in_array(GOOGLE_HEALTH_WEIGHT_SCOPE, $granted_scopes, true)) {
+                echo "Authorization failed: Google Health weight permission was not granted. Please authorize again.\n";
+                send_response_and_exit();
+            }
 
-        if ($http_code == 200) {
-            $token_data = json_decode($response, true);
-            save_token($token_data);
-            fitbit_log("Token saved successfully");
-            echo "Authorization successful. Token saved.";
+            $identity_result = google_health_get_identity($result['data']['access_token']);
+            if ($identity_result['status'] === 200 && !empty($identity_result['data']['healthUserId'])) {
+                $token_data = $result['data'];
+                $token_data['provider'] = 'google_health';
+                $token_data['health_user_id'] = $identity_result['data']['healthUserId'];
+                $token_data['legacy_user_id'] = $identity_result['data']['legacyUserId'] ?? null;
+                $token_data['expires_at'] = time() + intval($token_data['expires_in'] ?? 3600);
+
+                if (save_token($token_data)) {
+                    google_health_log('Google Health authorization completed for user ' . $token_data['health_user_id']);
+                    echo "Google Health authorization successful. Weight uploads are connected.";
+                } else {
+                    echo "Authorization succeeded, but the token could not be saved. Check file permissions for token.txt.";
+                }
+            } elseif (($identity_result['data']['error']['status'] ?? '') === 'FAILED_PRECONDITION') {
+                echo "Google account is not linked to Google Health. Open the Google Health app, link or migrate your account, then authorize again: https://fitbit.google.com/auth/signup";
+            } else {
+                google_health_log('Identity lookup failed: ' . ($identity_result['response'] ?: $identity_result['curl_error']));
+                echo "Authorization failed: could not verify the Google Health account. Check google_health_log.txt.";
+            }
         } else {
-            fitbit_log("Token exchange failed: " . $response);
-            echo "Authorization failed.";
+            google_health_log('Token exchange failed: ' . ($result['response'] ?: $result['curl_error']));
+            echo "Authorization failed during Google token exchange. Check google_health_log.txt.";
         }
     } else {
-        echo "No code received.";
+        echo "Google authorization was not completed: " . htmlspecialchars($_GET['error'] ?? 'no code received', ENT_QUOTES, 'UTF-8');
     }
     send_response_and_exit();
 }
@@ -81,13 +121,6 @@ function wh_log($log_msg)
     $log_file_data = $log_filename.'/' . date('ymd') . '.log';
     // if you don't add `FILE_APPEND`, the file will be erased each time you add a log
     file_put_contents($log_file_data, $log_msg . "\n", FILE_APPEND);
-}
-
-function fitbit_log($log_msg)
-{
-    $log_file = __DIR__ . '/fitbit_log.txt';
-    $timestamp = date('d.m.y H:i:s');
-    file_put_contents($log_file, "[$timestamp] $log_msg\n", FILE_APPEND);
 }
 
 function is_duplicate_request($id_str, $weight)
@@ -137,64 +170,6 @@ function send_response_and_exit() {
     exit;
 }
 
-function send_to_fitbit($weight) {
-    $token_data = load_token();
-    if (!$token_data) {
-        fitbit_log("No token available for Fitbit upload");
-        return false;
-    }
-
-    $access_token = $token_data['access_token'];
-
-    $url = 'https://api.fitbit.com/1/user/-/body/log/weight.json';
-    $data = [
-        'weight' => $weight,
-        'date' => date('Y-m-d'),
-        'time' => date('H:i:s'),
-    ];
-
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Authorization: Bearer ' . $access_token,
-        'Content-Type: application/json',
-    ]);
-
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    if ($http_code == 201) {
-        fitbit_log("Weight uploaded to Fitbit: $weight kg on " . $data['date']);
-        return true;
-    } elseif ($http_code == 401) {
-        // Try refresh
-        $access_token = refresh_token($token_data['refresh_token']);
-        if ($access_token) {
-            fitbit_log("Token refreshed successfully");
-
-            curl_setopt($ch, CURLOPT_HTTPHEADER, [
-                'Authorization: Bearer ' . $access_token,
-                'Content-Type: application/json',
-            ]);
-            $response = curl_exec($ch);
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-            if ($http_code == 201) {
-                fitbit_log("Weight uploaded to Fitbit after refresh: $weight kg on " . $data['date']);
-                return true;
-            }
-        }
-        fitbit_log("Fitbit upload failed after refresh: " . $response);
-        return false;
-    } else {
-        fitbit_log("Fitbit upload failed: HTTP $http_code - " . $response);
-        return false;
-    }
-}
-
 $data_string = $_GET['data'];
 
 $data_id = hexdec(substr($data_string, 0,2));
@@ -206,10 +181,10 @@ $weight = hexdec(substr($data_string, 38, 4))/100;
 
 if ($id1 && $id2 && $weight > 0) {
     if (is_duplicate_request($id_str, $weight)) {
-        fitbit_log("Duplicate request skipped for scale $id_str with weight $weight kg");
+        google_health_log("Duplicate request skipped for scale $id_str with weight $weight kg");
     } else {
         wh_log(date("d.m.y H:i:s") . " " . $weight);
-        if (send_to_fitbit($weight)) {
+        if (send_to_google_health($weight)) {
             update_last_request($id_str, $weight);
         }
     }

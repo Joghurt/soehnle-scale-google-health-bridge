@@ -1,6 +1,6 @@
-# soehnle-fitbit-bridge
+# soehnle-google-health-bridge
 
-This PHP script emulates the terminated Soehnle/Leifheit data service for Webconnect body scales like the 063340 model. Due to Leifheit/Soehnle's decision to discontinue the mysoehnle service, this bridge allows continued use of the scale by forwarding weight data to Fitbit for tracking and analysis.
+This PHP script emulates the terminated Soehnle/Leifheit data service for Webconnect body scales like the 063340 model. It allows continued use of the scale by logging weight measurements locally and forwarding them to Google Health.
 
 The return strings have been determined via tcpdump and from `https://github.com/biggaeh/bathroom_scales`.
 
@@ -9,43 +9,37 @@ This is a fork of the `https://github.com/haklein/soehnle-webconnect-dataservice
 ## Features
 
 - **Weight Data Logging**: Parses and logs weight measurements from the scale to local log files.
-- **Fitbit Integration**: Automatically uploads weight data to Fitbit for cloud-based tracking.
-- **Batch Upload**: Uploads historical weight data from log files to Fitbit, avoiding duplicates.
+- **Google Health Integration**: Automatically uploads weight data to Google Health for cloud-based tracking.
+- **Batch Upload**: Uploads historical weight data from log files to Google Health, avoiding duplicates.
 - **Web Dashboard**: Displays weight data with charts and statistics via a web interface.
-- **Token Management**: Handles Fitbit OAuth tokens with automatic refresh.
+- **Token Management**: Handles Google OAuth tokens with automatic refresh.
 
 # Installation
 
 ## Prerequisites
 
-- PHP with cURL extension enabled
+- PHP with the cURL extension enabled for both the CLI runtime and the web-server PHP runtime
 - Web server (e.g., Apache or Nginx) with PHP support
-- Fitbit Developer Account and App
+- Google Cloud project with the Google Health API enabled
+- Google OAuth 2.0 web client
 
-## Fitbit Setup
+## Google Health Setup
 
-1. **Create a Fitbit App**:
-   - Go to `https://dev.fitbit.com/apps/new`
-   - Create a new app with the following settings:
-     - Application Name: e.g., `Soehnle Fitbit Bridge`
-     - Description: Any description, doesn't matter since this will be no official app
-     - Application Website URL: Any
-     - Organization: Any
-     - Organization Website URL: Any
-     - Terms of Service URL: Any
-     - Privacy Policy URL: Any
-     - OAuth 2.0 Application Type: Personal
-     - Redirect URL: `https://bridge1.soehnle.de/devicedataservice/dataservice?action=callback`
-     - Default Access Type: Read & Write
-   - After creation, note the `OAuth 2.0 Client ID` and `Client Secret`.
+1. **Create a Google Cloud OAuth client**:
+   - Follow `https://developers.google.com/health/setup` to enable the Google Health API and create a Web application OAuth client.
+   - Add `https://bridge1.soehnle.de/devicedataservice/dataservice?action=callback` as an authorized redirect URI (use your own host/path if different).
+   - Under OAuth Data Access, allow `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.writeonly`.
+   - While the consent screen is in Testing, add your Google account as a test user. Complete any Google publication and verification requirements for production use.
+   - Before authorizing, sign in to the Google Health mobile app with the same Google account and link or migrate your existing Fitbit account.
 
 2. **Configure the Script**:
-   - Rename `config_example.php` to `config.php` and replace `FITBIT_CLIENT_ID` with the `OAuth 2.0 Client ID` and `FITBIT_CLIENT_SECRET` with the `Client Secret` from the Fitbit app overview.
+   - Copy the values from `config_example.php` into your local `config.php` (or update the existing file).
+   - Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REDIRECT_URI` to the values for your Google OAuth client. Do not reuse the retired Fitbit credentials.
 
 3. **Authorize the App**:
-   - Call in browser: `https://bridge1.soehnle.de/devicedataservice/dataservice?action=authorize`
-   - Log in to Fitbit and allow access.
-   - You will be redirected, and the token will be saved in a local file `token.txt`.
+   - Open `https://bridge1.soehnle.de/devicedataservice/dataservice?action=authorize` in a browser.
+   - Sign in to the linked Google account and grant the weight permission.
+   - Google tokens and the linked Health user ID are saved in `token.txt`. Existing Fitbit tokens cannot be reused.
 
 ## DNS Mangling
 
@@ -106,15 +100,15 @@ Create a `log` directory with proper permissions in the project directory for st
 Once you have completed the authorization steps, you can test the integration:
 
 - Send weight data from your scale: `?data=...` (e.g., from your scale)
-- The script parses the weight and automatically sends it to Fitbit
+- The script parses the weight and automatically sends it to Google Health
 - Weight data is logged to the `log/` directory (e.g., `log/240414.log`)
-- Fitbit upload results are logged to `fitbit_log.txt`
+- Google Health upload results are logged to `google_health_log.txt`
 
 ## Token Management
 
-- Tokens are stored in `token.txt`
+- Google OAuth tokens and the linked Health user ID are stored in `token.txt`
 - They are automatically renewed when they expire
-- Errors and token refresh activities are logged in `fitbit_log.txt`
+- Errors and token refresh activities are logged in `google_health_log.txt`
 
 # Usage
 
@@ -124,7 +118,7 @@ The scale sends data via GET requests to `https://bridge1.soehnle.de/devicedatas
 
 - Parses the data string for the weight.
 - Logs the weight to a daily log file in the `log/` directory (format: `dd.mm.yy hh:mm:ss weight`).
-- And automatically uploads the weight to Fitbit.
+- And automatically uploads the weight to Google Health.
 
 Example log entry:
 ```
@@ -133,20 +127,23 @@ Example log entry:
 
 ## Batch Upload of Historical Data
 
-To upload existing log data to Fitbit:
+To upload existing log data to Google Health:
 
-- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php`
-- **Command line**: `php /path/to/upload.php`
+- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=upload`
+- **Command line**: `php /path/to/upload.php --upload` or `php /path/to/upload.php -u`
+- **Preview without uploading**: `php /path/to/upload.php --preview` or `php /path/to/upload.php -p`
+- **Mark entries as done without uploading**: `php /path/to/upload.php --mark-only` or `php /path/to/upload.php -m`
+- Calling `upload.php` without a mode only displays usage and never uploads.
 
 The script performs the following steps:
 
 1. Reads all `log/*.log` files
 2. Parses the log format: `dd.mm.yy hh:mm:ss weight`
 3. Tracks already uploaded entries in `upload_history.txt` to avoid duplicates
-4. Uploads new entries to Fitbit with rate limiting (1 second between successful uploads)
+4. Uploads new entries to Google Health with rate limiting (1 second between successful uploads)
 5. Implements error handling with longer delays (3 seconds) after errors or rate-limit responses
 
-The script will display upload progress and any errors encountered during the process.
+The script displays progress and errors. Choose exactly one mode: `--upload` performs real uploads, `--preview` reports candidates without changing anything, and `--mark-only` adds candidates to `upload_history.txt` without sending them to Google Health. Marked entries will be skipped by later runs. A parameterless CLI or browser request only displays usage; the browser endpoint requires an explicit `mode` query parameter.
 
 ## Viewing Data
 
@@ -158,20 +155,21 @@ The script will display upload progress and any errors encountered during the pr
 
 # Files Overview
 
-- `config_example.php`: Fitbit client example configuration (Client ID and Secret).
-- `dataservice.php`: Main script handling scale data reception and Fitbit upload.
+- `config_example.php`: Google OAuth example configuration (Client ID, Secret, and redirect URI).
+- `google_health_common.php`: Shared Google OAuth and Google Health API handling.
+- `dataservice.php`: Main script handling scale data reception and Google Health upload.
 - `upload.php`: Batch uploader for historical data.
 - `show.php`: Web dashboard for viewing weight data.
 - `.htaccess`: Apache URL rewriting rules.
-- `token.txt`: Stores Fitbit OAuth tokens (auto-generated).
+- `token.txt`: Stores Google OAuth tokens and the linked Health user ID (auto-generated).
 - `upload_history.txt`: Tracks uploaded entries (auto-generated).
-- `fitbit_log.txt`: Logs Fitbit API interactions (auto-generated).
+- `google_health_log.txt`: Logs Google Health API interactions (auto-generated).
 - `log/*.log`: Daily weight log files.
 
 # Notes
 
-- Ensure files like `token.txt`, `log/` directory, `fitbit_log.txt`, and `upload_history.txt` are writable by the web server.
-- Weight is sent to Fitbit in kg with dot as decimal separator.
+- Ensure files like `token.txt`, `log/` directory, `google_health_log.txt`, and `upload_history.txt` are writable by the web server.
+- Weight is sent to Google Health in grams; local logs remain in kg.
 - Tokens are automatically refreshed when expired.
-- Check logs in the `log/` directory and `fitbit_log.txt` for any issues during operation.
+- Check logs in the `log/` directory and `google_health_log.txt` for any issues during operation.
 - Repeated identical requests within 30 seconds are automatically ignored to prevent duplicate uploads.
