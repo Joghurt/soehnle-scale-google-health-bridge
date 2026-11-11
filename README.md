@@ -129,10 +129,9 @@ Example log entry:
 
 To upload existing log data to Google Health:
 
-- Calling `upload.php` without a mode only displays usage and never uploads.
-- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php`
-- **Command line**: `php /path/to/upload.php`
-- **Preview without uploading**: - **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=preview`, `php /path/to/upload.php --preview` or `php /path/to/upload.php -p`
+- **Browser**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php` - this will only displays usage and never upload
+- **Command line**: `php /path/to/upload.php` - this will only displays usage and never upload
+- **Preview without uploading**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=preview`, `php /path/to/upload.php --preview` or `php /path/to/upload.php -p`
 - **Mark entries as done without uploading**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=mark-only`, `php /path/to/upload.php --mark-only` or `php /path/to/upload.php -m`
 - **Full run with uploading**: Call `https://bridge1.soehnle.de/devicedataservice/upload.php?mode=upload`, `php /path/to/upload.php --upload` or `php /path/to/upload.php -u`
 
